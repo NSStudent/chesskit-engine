@@ -49,12 +49,6 @@ public final class Engine: Sendable {
   /// Messenger used to communicate with engine.
   private let messenger: EngineMessenger
 
-  /// Queue used to synchronously send commands to engine.
-  private let commandQueue = DispatchQueue(
-    label: "ck-engine-command-queue",
-    qos: .userInitiated
-  )
-
   /// Queue used to synchronously log engine commands and responses.
   private let logQueue = DispatchQueue(
     label: "ck-engine-log-queue",
@@ -75,15 +69,13 @@ public final class Engine: Sendable {
   }
 
   deinit {
-    Task { [commandQueue, engineConfigurationActor, messenger] in
+    Task { [engineConfigurationActor, messenger] in
       // actions from `stop()` repeated here to avoid capturing `self` inside `deinit`
       guard await engineConfigurationActor.isRunning else { return }
 
-      commandQueue.sync {
-        messenger.sendCommand(EngineCommand.stop.rawValue)
-        messenger.sendCommand(EngineCommand.quit.rawValue)
-      }
-      messenger.stop()
+      await messenger.sendCommand(EngineCommand.stop.rawValue)
+      await messenger.sendCommand(EngineCommand.quit.rawValue)
+      await messenger.stop()
 
       await engineConfigurationActor.clearAsyncStream()
       await engineConfigurationActor.set(isRunning: false)
@@ -108,8 +100,8 @@ public final class Engine: Sendable {
     // Setup async stream response if not already set.
     await engineConfigurationActor.setAsyncStream()
 
-    setMessengerResponseHandler(coreCount: coreCount, multipv: multipv)
-    messenger.start()
+    await setMessengerResponseHandler(coreCount: coreCount, multipv: multipv)
+    await messenger.start()
 
     // start engine setup loop
     await send(command: .uci)
@@ -125,7 +117,7 @@ public final class Engine: Sendable {
 
     await send(command: .stop)
     await send(command: .quit)
-    messenger.stop()
+    await messenger.stop()
 
     await engineConfigurationActor.clearAsyncStream()
     await engineConfigurationActor.set(isRunning: false)
@@ -148,9 +140,7 @@ public final class Engine: Sendable {
 
     await log(command.rawValue)
 
-    commandQueue.sync {
-      messenger.sendCommand(command.rawValue)
-    }
+    await messenger.sendCommand(command.rawValue)
   }
 
   /// Enable printing logs to console.
@@ -189,8 +179,8 @@ public final class Engine: Sendable {
   private func setMessengerResponseHandler(
     coreCount: Int? = nil,
     multipv: Int = 1
-  ) {
-    messenger.responseHandler = { [weak self] response in
+  ) async {
+    await messenger.setResponseHandler { [weak self] response in
       Task { [weak self] in
         guard let self,
           let parsed = EngineResponse(rawValue: response)
