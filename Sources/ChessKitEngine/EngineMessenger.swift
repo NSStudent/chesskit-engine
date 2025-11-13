@@ -7,6 +7,22 @@ import ChessKitEngineCore
 import Darwin
 import Foundation
 
+private final class WeakActorBox<T: AnyObject>: @unchecked Sendable {
+  weak var value: T?
+
+  init(_ value: T) {
+    self.value = value
+  }
+}
+
+private struct EngineHandle: @unchecked Sendable {
+  let pointer: UnsafeMutableRawPointer
+}
+
+private struct ObserverToken: @unchecked Sendable {
+  let value: NSObjectProtocol
+}
+
 actor EngineMessenger {
 
   typealias ResponseHandler = @Sendable (String) -> Void
@@ -28,15 +44,22 @@ actor EngineMessenger {
     dup2(writeHandle.fileDescriptor, STDOUT_FILENO)
 
     if let pipeReadHandle {
-      stdoutObserver = notificationCenter.addObserver(
+      let weakSelf = WeakActorBox(self)
+      let observer = notificationCenter.addObserver(
         forName: FileHandle.readCompletionNotification,
         object: pipeReadHandle,
         queue: nil
-      ) { [weak self] notification in
+      ) { notification in
+        guard
+          let data = notification.userInfo?[NSFileHandleNotificationDataItem] as? Data
+        else { return }
+
         Task {
-          await self?.handleStdout(notification)
+          guard let messenger = weakSelf.value else { return }
+          await messenger.handleStdout(data)
         }
       }
+      stdoutObserver = ObserverToken(value: observer)
 
       await MainActor.run {
         pipeReadHandle.readInBackgroundAndNotify()
@@ -50,8 +73,9 @@ actor EngineMessenger {
     let readHandle = writePipe.fileHandleForReading
     dup2(readHandle.fileDescriptor, STDIN_FILENO)
 
-    engineTask = Task.detached(priority: .userInitiated) { [enginePointer] in
-      ChessKitInitializeEngine(enginePointer)
+    let handle = engineHandle
+    engineTask = Task.detached(priority: .userInitiated) {
+      ChessKitInitializeEngine(handle.pointer)
     }
   }
 
@@ -65,7 +89,7 @@ actor EngineMessenger {
     pipeWriteHandle = nil
 
     if let observer = stdoutObserver {
-      notificationCenter.removeObserver(observer)
+      notificationCenter.removeObserver(observer.value)
       stdoutObserver = nil
     }
 
@@ -90,24 +114,24 @@ actor EngineMessenger {
   init(engineType: EngineType) {
     switch engineType {
     case .stockfish:
-      enginePointer = ChessKitCreateStockfishEngine()
+      engineHandle = EngineHandle(pointer: ChessKitCreateStockfishEngine())
     case .lc0:
-      enginePointer = ChessKitCreateLc0Engine()
+      engineHandle = EngineHandle(pointer: ChessKitCreateLc0Engine())
     }
   }
 
   deinit {
     if let observer = stdoutObserver {
-      notificationCenter.removeObserver(observer)
+      notificationCenter.removeObserver(observer.value)
     }
 
-    ChessKitDeinitializeEngine(enginePointer)
-    ChessKitDestroyEngine(enginePointer)
+    ChessKitDeinitializeEngine(engineHandle.pointer)
+    ChessKitDestroyEngine(engineHandle.pointer)
   }
 
   // MARK: - Private
 
-  private let enginePointer: UnsafeMutableRawPointer
+  private let engineHandle: EngineHandle
   private let notificationCenter = NotificationCenter.default
 
   private var responseHandler: ResponseHandler?
@@ -115,10 +139,10 @@ actor EngineMessenger {
   private var writePipe: Pipe?
   private var pipeReadHandle: FileHandle?
   private var pipeWriteHandle: FileHandle?
-  private var stdoutObserver: NSObjectProtocol?
+  private var stdoutObserver: ObserverToken?
   private var engineTask: Task<Void, Never>?
 
-  private func handleStdout(_ notification: Notification) async {
+  private func handleStdout(_ data: Data) async {
     if let handle = pipeReadHandle {
       await MainActor.run {
         handle.readInBackgroundAndNotify()
@@ -126,7 +150,6 @@ actor EngineMessenger {
     }
 
     guard
-      let data = notification.userInfo?[NSFileHandleNotificationDataItem] as? Data,
       !data.isEmpty,
       let output = String(data: data, encoding: .utf8)
     else { return }
