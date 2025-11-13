@@ -3,21 +3,13 @@
 //  ChessKitEngine
 //
 
-import ChessKitEngineCore
+import Foundation
 
 /// Possible engines available in `ChessKitEngine`.
 public enum EngineType: Int, Sendable {
 
   case stockfish
   case lc0
-
-  /// Internal mapping from Swift to Obj-C type.
-  var objc: EngineType_objc {
-    switch self {
-    case .stockfish: .stockfish
-    case .lc0: .lc0
-    }
-  }
 
   /// The user-readable name of the engine.
   public var name: String {

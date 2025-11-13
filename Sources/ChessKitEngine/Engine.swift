@@ -70,7 +70,7 @@ public final class Engine: Sendable {
   ///   will be logged to the console. The default value is `false`.
   public init(type: EngineType, loggingEnabled: Bool = false) {
     self.type = type
-    messenger = EngineMessenger(engineType: type.objc)
+    messenger = EngineMessenger(engineType: type)
     engineConfigurationActor = EngineConfiguration(loggingEnabled: loggingEnabled)
   }
 
