@@ -7,20 +7,8 @@ import ChessKitEngineCore
 import Darwin
 import Foundation
 
-private final class WeakActorBox<T: AnyObject>: @unchecked Sendable {
-  weak var value: T?
-
-  init(_ value: T) {
-    self.value = value
-  }
-}
-
 private struct EngineHandle: @unchecked Sendable {
   let pointer: UnsafeMutableRawPointer
-}
-
-private struct ObserverToken: @unchecked Sendable {
-  let value: NSObjectProtocol
 }
 
 actor EngineMessenger {
@@ -43,28 +31,7 @@ actor EngineMessenger {
     let writeHandle = readPipe.fileHandleForWriting
     dup2(writeHandle.fileDescriptor, STDOUT_FILENO)
 
-    if let pipeReadHandle {
-      let weakSelf = WeakActorBox(self)
-      let observer = notificationCenter.addObserver(
-        forName: FileHandle.readCompletionNotification,
-        object: pipeReadHandle,
-        queue: nil
-      ) { notification in
-        guard
-          let data = notification.userInfo?[NSFileHandleNotificationDataItem] as? Data
-        else { return }
-
-        Task {
-          guard let messenger = weakSelf.value else { return }
-          await messenger.handleStdout(data)
-        }
-      }
-      stdoutObserver = ObserverToken(value: observer)
-
-      await MainActor.run {
-        pipeReadHandle.readInBackgroundAndNotify()
-      }
-    }
+    startReadLoop()
 
     let writePipe = Pipe()
     self.writePipe = writePipe
@@ -81,17 +48,15 @@ actor EngineMessenger {
 
   /// Closes the communication channel with the engine.
   func stop() {
-    pipeReadHandle?.closeFile()
-    pipeWriteHandle?.closeFile()
+    readTask?.cancel()
+    readTask = nil
+
+    try? pipeReadHandle?.close()
+    try? pipeWriteHandle?.close()
     readPipe = nil
     writePipe = nil
     pipeReadHandle = nil
     pipeWriteHandle = nil
-
-    if let observer = stdoutObserver {
-      notificationCenter.removeObserver(observer.value)
-      stdoutObserver = nil
-    }
 
     engineTask?.cancel()
     engineTask = nil
@@ -121,10 +86,6 @@ actor EngineMessenger {
   }
 
   deinit {
-    if let observer = stdoutObserver {
-      notificationCenter.removeObserver(observer.value)
-    }
-
     ChessKitDeinitializeEngine(engineHandle.pointer)
     ChessKitDestroyEngine(engineHandle.pointer)
   }
@@ -132,33 +93,54 @@ actor EngineMessenger {
   // MARK: - Private
 
   private let engineHandle: EngineHandle
-  private let notificationCenter = NotificationCenter.default
 
   private var responseHandler: ResponseHandler?
   private var readPipe: Pipe?
   private var writePipe: Pipe?
   private var pipeReadHandle: FileHandle?
   private var pipeWriteHandle: FileHandle?
-  private var stdoutObserver: ObserverToken?
   private var engineTask: Task<Void, Never>?
-  private var bufferString: String = ""
+  private var readTask: Task<Void, Never>?
 
-  private func handleStdout(_ data: Data) async {
-    if let handle = pipeReadHandle {
-      await MainActor.run {
-        handle.readInBackgroundAndNotify()
-      }
+  private func startReadLoop() {
+    guard let pipeReadHandle else { return }
+
+    readTask = Task.detached { [weak self] in
+      guard let self else { return }
+      await self.consumeOutput(from: pipeReadHandle)
     }
+  }
 
-    guard
-      !data.isEmpty,
-      let output = String(data: data, encoding: .utf8)
-    else { return }
-    bufferString.append(output)
-    let responses = bufferString.split(separator: "\n", omittingEmptySubsequences: false)
+  private func consumeOutput(from handle: FileHandle) async {
+    var buffer = Data()
+    do {
+      for try await byte in handle.bytes {
+        buffer.append(byte)
+
+        if byte == UInt8(ascii: "\n") {
+          await emitBuffer(&buffer)
+        }
+      }
+
+      // Flush any remaining data that wasn't newline-terminated.
+      if !buffer.isEmpty {
+        await emitBuffer(&buffer)
+      }
+    } catch is CancellationError {
+      return
+    } catch {
+      await emitBuffer(&buffer)
+    }
+  }
+
+  private func emitBuffer(_ buffer: inout Data) async {
+    guard !buffer.isEmpty else { return }
+    defer { buffer.removeAll(keepingCapacity: true) }
+
+    guard let output = String(data: buffer, encoding: .utf8) else { return }
+    let responses = output.split(separator: "\n", omittingEmptySubsequences: false)
     for response in responses {
       responseHandler?(String(response))
     }
-    bufferString = String(responses.last ?? "")
   }
 }
