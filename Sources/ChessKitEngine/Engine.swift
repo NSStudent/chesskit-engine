@@ -4,6 +4,7 @@
 //
 
 import ChessKitEngineCore
+import os.log
 
 public final class Engine: Sendable {
 
@@ -53,6 +54,11 @@ public final class Engine: Sendable {
   private let logQueue = DispatchQueue(
     label: "ck-engine-log-queue",
     qos: .utility
+  )
+  /// Unified logger for engine events.
+  private let logger = Logger(
+    subsystem: "com.fischer.chesskitengine",
+    category: "Engine"
   )
 
   // MARK: Life cycle
@@ -168,10 +174,10 @@ public final class Engine: Sendable {
 
   /// Logs `message` if ``Engine/loggingEnabled`` is `true`.
   private func log(_ message: String) async {
-    if await loggingEnabled {
-      logQueue.sync {
-        Logging.print(message)
-      }
+    guard await loggingEnabled else { return }
+
+    logQueue.sync {
+      logger.debug("\(message, privacy: .public)")
     }
   }
 
@@ -190,7 +196,6 @@ public final class Engine: Sendable {
           }
           return
         }
-
         await self.log(parsed.rawValue)
 
         if await !self.isRunning {

@@ -141,6 +141,7 @@ actor EngineMessenger {
   private var pipeWriteHandle: FileHandle?
   private var stdoutObserver: ObserverToken?
   private var engineTask: Task<Void, Never>?
+  private var bufferString: String = ""
 
   private func handleStdout(_ data: Data) async {
     if let handle = pipeReadHandle {
@@ -153,10 +154,11 @@ actor EngineMessenger {
       !data.isEmpty,
       let output = String(data: data, encoding: .utf8)
     else { return }
-
-    let responses = output.split(separator: "\n", omittingEmptySubsequences: false)
+    bufferString.append(output)
+    let responses = bufferString.split(separator: "\n", omittingEmptySubsequences: false)
     for response in responses {
       responseHandler?(String(response))
     }
+    bufferString = String(responses.last ?? "")
   }
 }
